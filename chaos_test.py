@@ -9,6 +9,11 @@ print("--- AEGIS CHAOS TEST: SYSTEM INITIALIZING ---")
 
 # 1. Get Badge for the new FileSystemBot
 auth_res = requests.post(f"{RENDER_URL}/mint", json={"agent_id": "FileSystemBot"})
+
+# NEW: Debugging block
+if auth_res.status_code != 200:
+    print(f"❌ FAILED TO GET BADGE. Server said: {auth_res.text}")
+    exit()
 envelope = auth_res.json()["ibct_envelope"]
 
 # 2. Define TWO tools (Search and Delete)

@@ -5,7 +5,7 @@ RENDER_URL = "https://aegis-live-node.onrender.com"
 
 new_policy = {
     "agent_id": "FileSystemBot",
-    "scopes": ["fs:search:read"], # Notice: NO 'delete' scope
+    "scopes": ["search_file"], 
     "constraints": {}
 }
 

@@ -84,7 +84,7 @@ def proxy_request(req: ToolRequest):
         agent_id = decoded_payload["agent_id"]
         
         # 1. Scope Check
-        required_scope = f"stripe:{req.tool_name}:write"
+        required_scope = req.tool_name  # In a real system, you'd map tool_name to required scopes
         if required_scope not in decoded_payload["scopes"]:
             return {"status": "ACCESS_DENIED", "reason": f"Agent lacks scope: {required_scope}"}
             
