@@ -8,7 +8,7 @@ payload = {
     "agent_id": "RefundBot-001" 
 }
 print("Requesting ID Badge from Aegis Control Plane...")
-response = requests.post("http://127.0.0.1:8000/mint", json=payload)
+response = requests.post("https://aegis-live-node.onrender.com/mint", json=payload)
 
 if response.status_code != 200:
     print(f"[FATAL ERROR] Aegis rejected our identity: {response.text}")
@@ -24,7 +24,7 @@ good_request = {
     "tool_name": "refund",
     "action_params": {"customer": "user_992", "amount": 50}
 }
-res1 = requests.post("http://127.0.0.1:8000/execute", json=good_request)
+res1 = requests.post("https://aegis-live-node.onrender.com/execute", json=good_request)
 print(f"Proxy: {res1.json()}\n")
 
 # 3. THE CONTEXTUAL HALLUCINATION
@@ -34,5 +34,5 @@ hallucination_request = {
     "tool_name": "refund",
     "action_params": {"customer": "user_992", "amount": 50000}
 }
-res2 = requests.post("http://127.0.0.1:8000/execute", json=hallucination_request)
+res2 = requests.post("https://aegis-live-node.onrender.com/execute", json=hallucination_request)
 print(f"Proxy: {res2.json()}\n")

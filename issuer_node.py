@@ -101,3 +101,20 @@ def proxy_request(req: ToolRequest):
         return {"status": "ACCESS_DENIED", "reason": "Token expired."}
     except jwt.InvalidTokenError:
         return {"status": "ACCESS_DENIED", "reason": "Intrusion detected."}
+    
+
+# --- NODE 4: THE ADMIN API (The "Dashboard" Backend) ---
+class PolicyUpdate(BaseModel):
+    agent_id: str
+    scopes: list[str]
+    constraints: dict
+
+@app.post("/admin/add_policy")
+def add_policy(req: PolicyUpdate):
+    # This simulates the CRO clicking 'Save' on a dashboard
+    cursor = db_conn.cursor()
+    cursor.execute('''INSERT OR REPLACE INTO policies (agent_id, scopes, constraints)
+                      VALUES (?, ?, ?)''', 
+                   (req.agent_id, json.dumps(req.scopes), json.dumps(req.constraints)))
+    db_conn.commit()
+    return {"status": "policy_updated", "agent": req.agent_id}
