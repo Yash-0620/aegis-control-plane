@@ -5,8 +5,18 @@ import crypto_core
 import time
 import sqlite3
 import json
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Aegis Enterprise Control Plane & Proxy")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins (perfect for our MVP testing)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (POST, GET, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
+
 master_priv, master_pub = crypto_core.setup_keys()
 
 # --- THE BRAIN: Database Setup ---

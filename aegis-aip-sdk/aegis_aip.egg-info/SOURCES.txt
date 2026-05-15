@@ -1,0 +1,9 @@
+README.md
+setup.py
+aegis_aip/__init__.py
+aegis_aip/client.py
+aegis_aip.egg-info/PKG-INFO
+aegis_aip.egg-info/SOURCES.txt
+aegis_aip.egg-info/dependency_links.txt
+aegis_aip.egg-info/requires.txt
+aegis_aip.egg-info/top_level.txt
