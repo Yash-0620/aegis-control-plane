@@ -1,130 +1,121 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import jwt
-import crypto_core
-import time
 import sqlite3
 import json
-from fastapi.middleware.cors import CORSMiddleware
+import jwt
 
-app = FastAPI(title="Aegis Enterprise Control Plane & Proxy")
+# --- AEGIS CONFIGURATION ---
+SECRET_KEY = "super_secret_aegis_key_for_mvp"
+
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (perfect for our MVP testing)
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (POST, GET, etc.)
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-master_priv, master_pub = crypto_core.setup_keys()
-
-# --- THE BRAIN: Database Setup ---
-def setup_database():
-    # This creates a local database file called aegis_policies.db
-    conn = sqlite3.connect("aegis_policies.db", check_same_thread=False)
+# --- DATABASE SETUP ---
+def init_db():
+    conn = sqlite3.connect("aegis_policies.db")
     cursor = conn.cursor()
-    
-    # Create the Policy Table
-    cursor.execute('''CREATE TABLE IF NOT EXISTS policies
+    cursor.execute('''CREATE TABLE IF NOT EXISTS policies 
                       (agent_id TEXT PRIMARY KEY, scopes TEXT, constraints TEXT)''')
-    
-    # Seed the database with our CRO's official rules!
-    # Notice: The rules live HERE on the server, not in the agent's code.
-    # We are setting the max refund limit to $500 centrally.
-    cursor.execute('''INSERT OR REPLACE INTO policies (agent_id, scopes, constraints)
-                      VALUES (?, ?, ?)''', 
-                   ("RefundBot-001", 
-                    json.dumps(["stripe:refund:write"]), 
-                    json.dumps({"max_refund_amount": 500}))) 
     conn.commit()
-    return conn
+    conn.close()
 
-# Boot up the database when the server starts
-db_conn = setup_database()
+init_db()
 
-def generate_constrained_ibct(private_key, agent_id, scopes, constraints):
-    payload = {
-        "agent_id": agent_id,
-        "scopes": scopes,
-        "constraints": constraints,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 300 
-    }
-    return jwt.encode(payload, private_key, algorithm="EdDSA")
-
-# --- NODE 1: THE SMART ISSUER ---
-class AgentRequest(BaseModel):
-    agent_id: str
-    # NOTICE: We deleted 'scopes' and 'constraints' from the request.
-    # The agent is no longer allowed to ask for specific permissions!
-
-@app.post("/mint")
-def mint_token(req: AgentRequest):
-    cursor = db_conn.cursor()
-    
-    # 1. Look up the agent in our secure database
-    cursor.execute("SELECT scopes, constraints FROM policies WHERE agent_id=?", (req.agent_id,))
-    row = cursor.fetchone()
-    
-    if not row:
-        print(f"[SECURITY ALERT] Unknown agent attempted connection: {req.agent_id}")
-        raise HTTPException(status_code=403, detail="Agent Identity not found in Aegis Database.")
-        
-    # 2. Extract the CRO's official rules
-    db_scopes = json.loads(row[0])
-    db_constraints = json.loads(row[1])
-    
-    print(f"--> [AEGIS DB] Found {req.agent_id}. Injecting scopes {db_scopes} and limits {db_constraints}.")
-    
-    # 3. Mint the badge using the DATABASE rules, entirely ignoring what the agent might want
-    token = generate_constrained_ibct(master_priv, req.agent_id, db_scopes, db_constraints)
-    return {"status": "secured", "ibct_envelope": token}
-
-# --- NODE 3: THE SECURE PROXY ---
-class ToolRequest(BaseModel):
-    envelope: str
-    tool_name: str
-    action_params: dict
-
-@app.post("/execute")
-def proxy_request(req: ToolRequest):
-    try:
-        decoded_payload = jwt.decode(req.envelope, master_pub, algorithms=["EdDSA"])
-        agent_id = decoded_payload["agent_id"]
-        
-        # 1. Scope Check
-        required_scope = req.tool_name  # In a real system, you'd map tool_name to required scopes
-        if required_scope not in decoded_payload["scopes"]:
-            return {"status": "ACCESS_DENIED", "reason": f"Agent lacks scope: {required_scope}"}
-            
-        # 2. Constraint Check
-        constraints = decoded_payload.get("constraints", {})
-        if "max_refund_amount" in constraints:
-            requested_amount = req.action_params.get("amount", 0)
-            if requested_amount > constraints["max_refund_amount"]:
-                return {"status": "ACCESS_DENIED", "reason": f"Blocked: ${requested_amount} exceeds central DB limit of ${constraints['max_refund_amount']}"}
-
-        return {"status": "SUCCESS", "data": f"Executed {req.tool_name} with params {req.action_params}"}
-        
-    except jwt.ExpiredSignatureError:
-        return {"status": "ACCESS_DENIED", "reason": "Token expired."}
-    except jwt.InvalidTokenError:
-        return {"status": "ACCESS_DENIED", "reason": "Intrusion detected."}
-    
-
-# --- NODE 4: THE ADMIN API (The "Dashboard" Backend) ---
-class PolicyUpdate(BaseModel):
+# --- DATA MODELS ---
+class PolicyPayload(BaseModel):
     agent_id: str
     scopes: list[str]
     constraints: dict
 
+class AgentAuth(BaseModel):
+    agent_id: str
+
+class ToolRequest(BaseModel):
+    token: str
+    tool_name: str
+    params: dict
+
+# --- CONTROL PLANE ENDPOINTS ---
 @app.post("/admin/add_policy")
-def add_policy(req: PolicyUpdate):
-    # This simulates the CRO clicking 'Save' on a dashboard
-    cursor = db_conn.cursor()
-    cursor.execute('''INSERT OR REPLACE INTO policies (agent_id, scopes, constraints)
-                      VALUES (?, ?, ?)''', 
-                   (req.agent_id, json.dumps(req.scopes), json.dumps(req.constraints)))
-    db_conn.commit()
-    return {"status": "policy_updated", "agent": req.agent_id}
+def add_policy(payload: PolicyPayload):
+    conn = sqlite3.connect("aegis_policies.db")
+    cursor = conn.cursor()
+    cursor.execute("REPLACE INTO policies (agent_id, scopes, constraints) VALUES (?, ?, ?)",
+                   (payload.agent_id, json.dumps(payload.scopes), json.dumps(payload.constraints)))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": f"Policy for {payload.agent_id} synced."}
+
+@app.post("/mint")
+def mint_badge(auth: AgentAuth):
+    conn = sqlite3.connect("aegis_policies.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT scopes, constraints FROM policies WHERE agent_id=?", (auth.agent_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=403, detail="Agent not registered in Aegis Cloud.")
+
+    scopes = json.loads(row[0])
+    constraints = json.loads(row[1])
+
+    payload = {
+        "agent_id": auth.agent_id,
+        "scopes": scopes,
+        "constraints": constraints,
+    }
+    
+    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+    return {"token": token}
+
+# --- THE UNIVERSAL BOUNCER (PROXY) ---
+@app.post("/execute")
+def proxy_request(req: ToolRequest):
+    try:
+        # 1. Verify Cryptographic Envelope
+        decoded = jwt.decode(req.token, SECRET_KEY, algorithms=["HS256"])
+        agent_id = decoded.get("agent_id")
+        scopes = decoded.get("scopes", [])
+        constraints = decoded.get("constraints", {})
+
+        # 2. Scope Validation (Does it have the badge?)
+        if req.tool_name not in scopes:
+            return {"status": "ACCESS_DENIED", "reason": f"Agent lacks scope: {req.tool_name}"}
+
+        # 3. Contextual Parameter Bounding (The Hallucination Lock)
+        tool_constraints = constraints.get(req.tool_name, {})
+        params = req.params
+
+        # Rule A: Financial Refunds
+        if req.tool_name == "stripe:refund:write":
+            if params.get("amount", 0) > tool_constraints.get("max_amount", 0):
+                return {"status": "ACCESS_DENIED", "reason": f"Blocked: ${params.get('amount')} exceeds limit of ${tool_constraints.get('max_amount')}"}
+
+        # Rule B: File System Search
+        elif req.tool_name == "fs:search:read":
+            file_type = params.get("file_extension")
+            allowed_exts = tool_constraints.get("allowed_extensions", [])
+            if file_type not in allowed_exts:
+                return {"status": "ACCESS_DENIED", "reason": f"Blocked: File type '{file_type}' not in allowed extensions {allowed_exts}"}
+
+        # Rule C: Email Communications
+        elif req.tool_name == "email:send:write":
+            if tool_constraints.get("internal_domains_only", True):
+                recipient = params.get("to_email", "")
+                if not recipient.endswith("@company.com"):
+                    return {"status": "ACCESS_DENIED", "reason": "Blocked: Agent restricted to internal corporate emails only."}
+
+        # 4. Forward to real MCP server (Simulated for MVP)
+        return {"status": "SUCCESS", "data": f"Executed {req.tool_name} with params {params}"}
+
+    except jwt.InvalidTokenError:
+        return {"status": "ACCESS_DENIED", "reason": "Invalid or tampered cryptographic badge."}
