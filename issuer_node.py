@@ -8,7 +8,7 @@ import jwt
 
 # --- AEGIS CONFIGURATION ---
 # Render will automatically inject your Supabase URL here
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://your_backup_url_here")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:%25WcWF%236Ux%25F%23i-s@db.gmyzzdfllhpahylssxax.supabase.co:5432/postgres")
 SECRET_KEY = os.environ.get("AEGIS_SECRET_KEY", "super_secret_aegis_key_for_mvp")
 
 app = FastAPI()
