@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5,8 +7,9 @@ import sqlite3
 import json
 import jwt
 
-# --- AEGIS CONFIGURATION ---
-SECRET_KEY = "super_secret_aegis_key_for_mvp"
+# --- AEGIS CONFIGURATION ---\
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://your_backup_url_here")
+SECRET_KEY = os.environ.get("AEGIS_SECRET_KEY", "super_secret_aegis_key_for_mvp")
 
 app = FastAPI()
 
@@ -46,19 +49,25 @@ class ToolRequest(BaseModel):
 # --- CONTROL PLANE ENDPOINTS ---
 @app.post("/admin/add_policy")
 def add_policy(payload: PolicyPayload):
-    conn = sqlite3.connect("aegis_policies.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("REPLACE INTO policies (agent_id, scopes, constraints) VALUES (?, ?, ?)",
-                   (payload.agent_id, json.dumps(payload.scopes), json.dumps(payload.constraints)))
+    # Postgres uses %s instead of ? for variables, and ON CONFLICT for UPSERT
+    cursor.execute("""
+        INSERT INTO policies (agent_id, scopes, constraints) 
+        VALUES (%s, %s, %s)
+        ON CONFLICT (agent_id) 
+        DO UPDATE SET scopes = EXCLUDED.scopes, constraints = EXCLUDED.constraints
+    """, (payload.agent_id, json.dumps(payload.scopes), json.dumps(payload.constraints)))
     conn.commit()
     conn.close()
     return {"status": "success", "message": f"Policy for {payload.agent_id} synced."}
 
+
 @app.post("/mint")
 def mint_badge(auth: AgentAuth):
-    conn = sqlite3.connect("aegis_policies.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT scopes, constraints FROM policies WHERE agent_id=?", (auth.agent_id,))
+    cursor.execute("SELECT scopes, constraints FROM policies WHERE agent_id=%s", (auth.agent_id,))
     row = cursor.fetchone()
     conn.close()
 
@@ -68,14 +77,10 @@ def mint_badge(auth: AgentAuth):
     scopes = json.loads(row[0])
     constraints = json.loads(row[1])
 
-    payload = {
-        "agent_id": auth.agent_id,
-        "scopes": scopes,
-        "constraints": constraints,
-    }
-    
+    payload = {"agent_id": auth.agent_id, "scopes": scopes, "constraints": constraints}
     token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
     return {"token": token}
+
 
 # --- THE UNIVERSAL BOUNCER (PROXY) ---
 @app.post("/execute")
