@@ -1,6 +1,8 @@
 import psycopg2
 import os
 import time
+import json
+import ast
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,8 +40,35 @@ class ExecuteRequest(BaseModel):
     tool_name: str
     params: dict
 
-# --- ENDPOINTS ---
 
+# --- BULLETPROOF PARSER ---
+def safe_parse(data, default_val):
+    """Safely converts hybrid JS/Python strings back into Python dictionaries."""
+    if isinstance(data, (list, dict)):
+        return data
+    
+    # 1. Try standard JSON parsing
+    try:
+        return json.loads(data)
+    except Exception:
+        pass
+        
+    # 2. Try Python literal eval (handles 'True' and single quotes)
+    try:
+        return ast.literal_eval(data)
+    except Exception:
+        pass
+        
+    # 3. Ultimate Fallback: Fix JS booleans in Python strings
+    try:
+        safe_str = str(data).replace("true", "True").replace("false", "False").replace("null", "None")
+        return ast.literal_eval(safe_str)
+    except Exception as e:
+        print(f"Parsing failed completely: {e}")
+        return default_val
+
+
+# --- ENDPOINTS ---
 @app.post("/admin/add_policy")
 def add_policy(payload: PolicyPayload):
     """Called by the Next.js Dashboard to save rules to Supabase."""
@@ -73,12 +102,16 @@ def mint_token(req: MintRequest):
     if not row:
         raise HTTPException(status_code=404, detail="Agent identity not found in Aegis Cloud.")
 
+    # Safely parse the database strings into Python objects
+    parsed_scopes = safe_parse(row[0], [])
+    parsed_constraints = safe_parse(row[1], {})
+
     # Embed the user_id securely into the token payload
     jwt_payload = {
         "agent_id": req.agent_id,
         "user_id": row[2], 
-        "scopes": eval(row[0]),
-        "constraints": eval(row[1])
+        "scopes": parsed_scopes,
+        "constraints": parsed_constraints
     }
     
     token = jwt.encode(jwt_payload, SECRET_KEY, algorithm="HS256")
