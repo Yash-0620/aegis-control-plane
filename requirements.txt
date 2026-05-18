@@ -4,3 +4,4 @@ pyjwt
 cryptography
 pydantic
 psycopg2-binary
+supabase
