@@ -1,6 +1,6 @@
-# Aegis AIP (Agentic Identity Protocol) 🛡️
+# Aegis AIP (Agentic Identity Protocol) SDK 🛡️
 
-**The Zero-Trust Enforcement Layer for Agentic AI.**
+**The Zero-Trust Enforcement SDK for Agentic AI.**
 
 Aegis provides cryptographic, mathematical boundaries for LLM tool execution. It ensures that AI agents (Claude, GPT-4, Llama-3) cannot exfiltrate data, hallucinate unauthorized financial transactions, or execute destructive commands, even if their prompts are injected or jailbroken.
 
@@ -9,9 +9,12 @@ Relying on an LLM's internal safety alignment (RLHF) or prompt engineering is a 
 
 ## The Solution: The Switzerland Moat
 Aegis sits at the **Network/Proxy layer**, completely agnostic to the underlying LLM.
-1. The Enterprise CISO configures mathematical boundaries via the Aegis Cloud Console.
-2. The agent is issued a stateless, cryptographically signed JWT.
-3. When the agent attempts to execute a tool, Aegis mathematically verifies the payload against the token signature in real-time. Unauthorized actions are hard-blocked at the proxy level.
+1. The Enterprise CISO configures mathematical boundaries and generates an API Key via the **[Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)**.
+2. The developer deploys the **[Aegis MCP Sidecar](https://github.com/Yash-0620/aegis-mcp-sidecar.git)** locally.
+3. This `aegis-aip` SDK automatically fetches an Ed25519 cryptographically signed token (IBCT) and routes all LLM tool calls through the local sidecar.
+4. The sidecar mathematically verifies the payload in `< 2ms` offline. Unauthorized actions are hard-blocked at the proxy level.
+
+---
 
 ## 🚀 5-Minute Quickstart
 
@@ -19,10 +22,10 @@ Aegis sits at the **Network/Proxy layer**, completely agnostic to the underlying
 ```bash
 pip install aegis-aip
 ```
-(Note: If you are using Aegis with CrewAI, also run pip install crewai.)
+*(Note: If you are using Aegis with CrewAI, also run `pip install crewai`.)*
 
-**2. Configure Environment**
-Generate your API key from your Aegis Cloud Console and set the environment variable:
+### 2. Configure Environment
+Generate your API key from your **[Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)** and set your environment variables:
 ```bash
 # Your Aegis Cloud API Key
 export AEGIS_API_KEY="aegis_live_..."
@@ -31,8 +34,8 @@ export AEGIS_API_KEY="aegis_live_..."
 export OPENAI_API_KEY="sk-..."
 ```
 
-**3. Secure Your Agent (Python)**
-Wrap your existing tool calls in the Aegis Client. It fetches dynamic, invocation-bound capability tokens and ensures every execution adheres to your defined mathematical boundaries.
+### 3. Secure Your Agent (Python)
+Wrap your existing tool calls in the Aegis Client. It acts as a network interceptor, fetching your dynamic capabilities and ensuring every execution routes securely through your local Aegis edge proxy.
 
 ```python
 from crewai import Agent, Task, Crew
@@ -40,10 +43,11 @@ from crewai.tools import BaseTool
 from aegis_aip import AegisClient
 import os
 
-# 1. Initialize Aegis (Production Configuration)
+# 1. Initialize Aegis (The Sidecar Interceptor)
 aegis = AegisClient(
     agent_id=os.getenv("AEGIS_API_KEY"),
-    control_plane_url="[https://aegis-live-node.onrender.com](https://aegis-live-node.onrender.com)"
+    control_plane_url="[https://aegis-live-node.onrender.com](https://aegis-live-node.onrender.com)",
+    sidecar_url="http://localhost:8080" # Routes traffic to your local Aegis proxy
 )
 
 # 2. Build the Zero-Trust CrewAI Tool
@@ -52,14 +56,14 @@ class SecureFinancialTool(BaseTool):
     description: str = "Refunds a customer. Crucial: All executions are mathematically verified by Aegis IAM."
 
     def _run(self, amount: float, customer_id: str) -> str:
-        # Aegis Intercept: Prevents unauthorized/out-of-bounds execution
+        # Aegis Intercept: Routes payload to the Sidecar for Ed25519 offline verification
         auth_response = aegis.secure_tool_call(
             tool_name="stripe:refund:write",
             params={"amount": amount, "customer_id": customer_id}
         )
         
         # The Mathematical Drop
-        if auth_response.get("status") == "ACCESS_DENIED":
+        if isinstance(auth_response, dict) and auth_response.get("status") == "ACCESS_DENIED":
             return f"AEGIS INTERCEPT: {auth_response.get('reason')}"
         
         return f"Success: Refunded ${amount} to {customer_id}"
@@ -91,9 +95,11 @@ if __name__ == "__main__":
     print(result)
 ```
 
-## Supported Enterprise Boundaries ("The Switzerland Moat")
+---
 
-Aegis currently enforces mathematical bounds across four primary enterprise threat vectors. If an AI agent attempts to violate its cryptographic token, Aegis intercepts and returns an `ACCESS_DENIED` status.
+## 🛡️ Supported Enterprise Boundaries ("The Switzerland Moat")
+
+Aegis currently enforces mathematical bounds across four primary enterprise threat vectors. If an AI agent attempts to violate its cryptographic token, the Aegis Sidecar drops the network request and returns an `ACCESS_DENIED` status.
 
 **1. Financial Limits (Stripe)**
 Blocks transactions exceeding the CISO-defined integer threshold.
@@ -112,8 +118,8 @@ aegis.secure_tool_call("email:send:write", {"to_email": "hacker@gmail.com"})
 **3. Infrastructure Protection (File System)**
 Restricts agent read/write access to strictly approved file extensions.
 ```python
-aegis.secure_tool_call("fs:search:read", {"file_extension": ".exe"}) 
-# ❌ BLOCKED: Unauthorized File Extension: .exe
+aegis.secure_tool_call("fs:search:read", {"file_extension": "exe"}) 
+# ❌ BLOCKED: Unauthorized File Extension: exe
 ```
 
 **4. Anti-Injection (SQL Databases)**
@@ -123,12 +129,14 @@ aegis.secure_tool_call("database:query:read", {"target_table": "users", "query":
 # ❌ BLOCKED: Destructive SQL Operation Detected
 ```
 
-## Architecture (V2)
+---
+
+## 🏗️ Architecture (V2)
 Aegis is built for high-throughput, Zero-Trust enterprise environments:
-* **Control Plane:** Next.js Dashboard for multi-tenant policy configuration.
+* **Control Plane:** Next.js Dashboard for multi-tenant policy configuration and API key generation.
 * **Database:** PostgreSQL (Supabase) with Row-Level Security and SOC2-compliant immutable audit logs.
-* **Execution Proxy:** Stateless Python FastAPI nodes (Render) performing JWT cryptographic verification in < 20ms.
-* **Client SDK:** A lightweight, dependency-free Python wrapper for instant developer integration.
+* **Execution Proxy (Sidecar):** Stateless Docker containers performing offline Ed25519 cryptographic verification in `< 2ms`.
+* **Client SDK (This Repo):** A lightweight network interceptor that ensures LLM traffic is securely routed through the Sidecar.
 
 ## License
 MIT License - Open Source for the builders.
