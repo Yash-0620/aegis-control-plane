@@ -1,3 +1,4 @@
+from httpcore import request
 import psycopg2
 import os
 import time
@@ -87,12 +88,20 @@ def add_policy(payload: PolicyPayload):
         cursor = conn.cursor()
         
         # UPDATED: Inserting the status column
-        cursor.execute('''
-            INSERT INTO policies (agent_id, user_id, scopes, constraints, status) 
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (agent_id) DO UPDATE 
-            SET user_id = EXCLUDED.user_id, scopes = EXCLUDED.scopes, constraints = EXCLUDED.constraints, status = EXCLUDED.status
-        ''', (payload.agent_id, payload.user_id, str(payload.scopes), str(payload.constraints), payload.status))
+        cursor.execute(
+    """
+    INSERT INTO policies (user_id, agent_id, api_key, scopes, constraints, status) 
+    VALUES (%s, %s, %s, %s, %s, %s)
+    """,
+    (
+        payload.user_id, 
+        payload.agent_id, 
+        payload.api_key, 
+        json.dumps(payload.scopes), 
+        json.dumps(payload.constraints), 
+        payload.status
+    )
+)
         
         conn.commit()
         conn.close()
@@ -106,8 +115,11 @@ def mint_token(req: MintRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # UPDATED: Search using 'status' (which holds the token), and fetch the real 'agent_id' (row[3])
-    cursor.execute("SELECT scopes, constraints, user_id, agent_id FROM policies WHERE status = %s", (req.agent_id,))
+    # The SDK sends the API key in the request to authenticate
+cursor.execute(
+    "SELECT scopes, constraints FROM policies WHERE api_key = %s AND status = 'ACTIVE'", 
+    (request.agent_id,) # Note: The SDK currently passes the key via the 'agent_id' field
+)
     row = cursor.fetchone()
     conn.close()
 
