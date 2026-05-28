@@ -120,11 +120,11 @@ cursor.execute(
     "SELECT scopes, constraints FROM policies WHERE api_key = %s AND status = 'ACTIVE'", 
     (request.agent_id,) # Note: The SDK currently passes the key via the 'agent_id' field
 )
-    row = cursor.fetchone()
-    conn.close()
+row = cursor.fetchone()
+conn.close()
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Agent identity not found in Aegis Cloud.")
+if not row:
+    raise HTTPException(status_code=404, detail="Agent identity not found in Aegis Cloud.")
 
     parsed_scopes = safe_parse(row[0], [])
     parsed_constraints = safe_parse(row[1], {})
