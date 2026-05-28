@@ -6,6 +6,11 @@ Aegis is the open-source standard for zero-trust AI agent security. It prevents 
 
 **The "Switzerland Moat" for Non-Human Identities (NHI).** Aegis Control Plane is a model-agnostic, zero-trust backend that manages the lifecycle of Invocation-Bound Capability Tokens (IBCTs) for AI Agents. It provides enterprise-grade IAM for the Model Context Protocol (MCP) without relying on brittle prompt engineering or LLM alignment.
 
+## 🌐 The Aegis Ecosystem
+To deploy a mathematically enforced zero-trust boundary, Aegis utilizes a decoupled architecture:
+1. **[The Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)**: Your CISO dashboard to define zero-trust policies, set parameter bounds, and generate Agent API Keys.
+2. **[The Aegis MCP Sidecar](https://github.com/Yash-0620/aegis-mcp-sidecar.git)**: The stateless, open-source edge proxy that enforces your policies locally.
+
 ## 🛡️ The Architecture: Ed25519 Cryptography
 Unlike legacy API wrappers that require synchronous cloud round-trips to evaluate agent permissions, Aegis utilizes **Asymmetric Ed25519 Cryptography**:
 1. **The Private Key (This Repo):** The Control Plane securely holds the Ed25519 Private Key. It is the only entity mathematically capable of minting IBCTs.
@@ -13,25 +18,25 @@ Unlike legacy API wrappers that require synchronous cloud round-trips to evaluat
 
 This architecture decouples token issuance from token verification, granting AI agents true zero-latency execution while maintaining absolute cryptographic bounds.
 
-## 🚀 Enterprise Compliance (SOC2 & NYDFS)
-Aegis automatically ingests asynchronous telemetry from the edge proxies, creating an immutable SIEM (Security Information and Event Management) ledger in PostgreSQL. Every hallucination, blocked payload, and authorized tool call is forensically logged for strict regulatory compliance.
-
 ---
 
 ## 🛠️ Integration & Developer Friction
 
 To keep integration frictionless, developers do **not** need to interact with the REST API directly. We provide a drop-in Python SDK (`aegis-aip`) that acts as a secure network interceptor.
 
-### 1. Install the SDK
+### 1. Generate Your Agent Identity
+Head over to the **[Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)**. Create an account, configure your agent's cryptographic bounds (e.g., maximum dollar amounts for Stripe refunds), and mint your Agent API Key.
+
+### 2. Install the SDK
 ```bash
 pip install aegis-aip
 ```
 
-### 2. Secure Your Agent in 3 Lines
+### 3. Secure Your Agent in 3 Lines
 ```python
 from aegis_aip import AegisClient
 
-# 1. Initialize the SDK (Automatically fetches IBCTs from the Control Plane)
+# 1. Initialize the SDK with the key generated from the Cloud Console
 aegis = AegisClient(
     agent_id="FinanceBot_live_8f45f0...",
     control_plane_url="[https://aegis-live-node.onrender.com](https://aegis-live-node.onrender.com)",
@@ -47,9 +52,11 @@ response = aegis.secure_tool_call(
 print(response)
 ```
 
+---
+
 ## 🏗️ Self-Hosting the Control Plane
 
-If your enterprise requires an entirely on-premise, air-gapped deployment, you can self-host the Control Plane.
+If your enterprise requires an entirely on-premise, air-gapped deployment, you can self-host the Control Plane instead of using our cloud hosted version.
 
 ### Prerequisites
 - Python 3.11+
@@ -58,7 +65,7 @@ If your enterprise requires an entirely on-premise, air-gapped deployment, you c
 ### Deployment Steps
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Yash-0620/aegis-control-plane.git
+git clone [https://github.com/your-org/aegis-control-plane.git](https://github.com/your-org/aegis-control-plane.git)
 cd aegis-control-plane
 
 # 2. Install dependencies
