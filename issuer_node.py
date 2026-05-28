@@ -57,9 +57,10 @@ class ExecuteRequest(BaseModel):
 
 
 class TelemetryPayload(BaseModel):
-    agent_id: str  # This is the long API key sent by the Sidecar
+    agent_id: str
     action: str
     reason: str
+    status: str = "BLOCKED"
 
 
 # --- BULLETPROOF PARSER ---
@@ -169,12 +170,11 @@ def mint_token(request: MintRequest):
 
 @app.post("/telemetry/log_threat")
 def log_threat(payload: TelemetryPayload):
-    """SaaS Telemetry Receiver: Logs threats from external Enterprise Sidecars."""
+    """SaaS Telemetry Receiver: Logs threats and allowed actions from Edge."""
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         
-        # FIX: We must query the new api_key column, not the status column
         cursor.execute("SELECT user_id, agent_id FROM policies WHERE api_key = %s", (payload.agent_id,))
         row = cursor.fetchone()
 
@@ -185,17 +185,16 @@ def log_threat(payload: TelemetryPayload):
         real_user_id = row[0]
         readable_agent_name = row[1]
 
-        # Securely Insert into the SIEM Ledger
+        # FIX: Dynamically insert payload.status instead of hardcoding "BLOCKED"
+        # Also lowered latency_ms to '2' to reflect our new Ed25519 offline speed!
         cursor.execute('''
             INSERT INTO audit_logs (user_id, agent_id, action, target, status, reason, latency_ms) 
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ''', (real_user_id, readable_agent_name, payload.action, "network_intercept", "BLOCKED", payload.reason, 12))
+        ''', (real_user_id, readable_agent_name, payload.action, "network_intercept", payload.status, payload.reason, 2))
         
         conn.commit()
         conn.close()
         return {"status": "success", "message": "Telemetry securely logged."}
-    except HTTPException:
-        raise
     except Exception as e:
         print(f"Telemetry Sync Error: {e}")
         raise HTTPException(status_code=500, detail="Internal SaaS Error")
