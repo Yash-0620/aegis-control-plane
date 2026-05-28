@@ -119,9 +119,9 @@ def mint_token(request: MintRequest):
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         
-        # Authenticate strictly against the new api_key column
+        # FIX: Fetch user_id and agent_id as well to inject into the JWT for telemetry tracking
         cursor.execute(
-            "SELECT scopes, constraints FROM policies WHERE api_key = %s AND status = 'ACTIVE'", 
+            "SELECT scopes, constraints, user_id, agent_id FROM policies WHERE api_key = %s AND status = 'ACTIVE'", 
             (request.agent_id,)
         )
         
@@ -132,18 +132,20 @@ def mint_token(request: MintRequest):
             conn.close()
             raise HTTPException(status_code=401, detail="Invalid API Key or Inactive Policy")
             
-        scopes_data, constraints_data = row
+        scopes_data, constraints_data, user_id, agent_id = row
         
         # Safely parse JSONB/String data from PostgreSQL
         parsed_scopes = json.loads(scopes_data) if isinstance(scopes_data, str) else scopes_data
         parsed_constraints = json.loads(constraints_data) if isinstance(constraints_data, str) else constraints_data
         
-        # Construct the IBCT (Invocation-Bound Capability Token)
+        # Construct the IBCT with full identity data
         jwt_payload = {
             "api_key": request.agent_id,
+            "user_id": user_id,
+            "agent_id": agent_id,  # The human-readable name
             "scopes": parsed_scopes,
             "constraints": parsed_constraints,
-            "exp": time.time() + 3600  # Strict 1-hour time-to-live
+            "exp": time.time() + 3600
         }
         
         token = jwt.encode(jwt_payload, SECRET_KEY, algorithm="HS256")
@@ -274,12 +276,11 @@ def execute_tool(req: ExecuteRequest):
 def log_threat(payload: TelemetryPayload):
     """SaaS Telemetry Receiver: Logs threats from external Enterprise Sidecars."""
     try:
-        conn = get_db_connection()
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         
-        # 1. Reverse-Lookup the real user_id and human-readable agent name
-        # Remember: the API key is stored in the 'status' column in your schema
-        cursor.execute("SELECT user_id, agent_id FROM policies WHERE status = %s", (payload.agent_id,))
+        # FIX: We must query the new api_key column, not the status column
+        cursor.execute("SELECT user_id, agent_id FROM policies WHERE api_key = %s", (payload.agent_id,))
         row = cursor.fetchone()
 
         if not row:
@@ -289,7 +290,7 @@ def log_threat(payload: TelemetryPayload):
         real_user_id = row[0]
         readable_agent_name = row[1]
 
-        # 2. Securely Insert into the SIEM Ledger
+        # Securely Insert into the SIEM Ledger
         cursor.execute('''
             INSERT INTO audit_logs (user_id, agent_id, action, target, status, reason, latency_ms) 
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -298,6 +299,8 @@ def log_threat(payload: TelemetryPayload):
         conn.commit()
         conn.close()
         return {"status": "success", "message": "Telemetry securely logged."}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Telemetry Sync Error: {e}")
         raise HTTPException(status_code=500, detail="Internal SaaS Error")
