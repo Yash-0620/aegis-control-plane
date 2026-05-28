@@ -32,16 +32,18 @@ app.add_middleware(
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# --- MODELS ---
+# --- PYDANTIC MODELS ---
 class PolicyPayload(BaseModel):
     user_id: str
     agent_id: str
+    api_key: str
     scopes: list
     constraints: dict
-    status: str = None
+    status: str
+    origin: str = "Internal AI Agent"
 
 class MintRequest(BaseModel):
-    agent_id: str
+    agent_id: str  # Note: The SDK currently passes the api_key via this field
 
 class ExecuteRequest(BaseModel):
     token: str
@@ -79,65 +81,83 @@ def safe_parse(data, default_val):
         return default_val
 
 
-# --- ENDPOINTS ---
+# --- CONTROL PLANE ENDPOINTS ---
 @app.post("/admin/add_policy")
 def add_policy(payload: PolicyPayload):
-    """Called by the Next.js Dashboard to save rules to Supabase."""
     try:
-        conn = get_db_connection()
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         
-        # UPDATED: Inserting the status column
         cursor.execute(
-    """
-    INSERT INTO policies (user_id, agent_id, api_key, scopes, constraints, status) 
-    VALUES (%s, %s, %s, %s, %s, %s)
-    """,
-    (
-        payload.user_id, 
-        payload.agent_id, 
-        payload.api_key, 
-        json.dumps(payload.scopes), 
-        json.dumps(payload.constraints), 
-        payload.status
-    )
-)
+            """
+            INSERT INTO policies (user_id, agent_id, api_key, scopes, constraints, status) 
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                payload.user_id, 
+                payload.agent_id, 
+                payload.api_key, 
+                json.dumps(payload.scopes), 
+                json.dumps(payload.constraints), 
+                payload.status
+            )
+        )
         
         conn.commit()
+        cursor.close()
         conn.close()
-        return {"status": "success", "message": "Zero-Trust Policy Deployed."}
+        
+        return {"status": "SUCCESS", "message": "Policy deployed to Aegis DB"}
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[AEGIS DB ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail="Database insertion failed.")
 
 @app.post("/mint")
-def mint_token(req: MintRequest):
-    """Mints the Cryptographic Token containing the user's rules."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # The SDK sends the API key in the request to authenticate
-cursor.execute(
-    "SELECT scopes, constraints FROM policies WHERE api_key = %s AND status = 'ACTIVE'", 
-    (request.agent_id,) # Note: The SDK currently passes the key via the 'agent_id' field
-)
-row = cursor.fetchone()
-conn.close()
-
-if not row:
-    raise HTTPException(status_code=404, detail="Agent identity not found in Aegis Cloud.")
-
-    parsed_scopes = safe_parse(row[0], [])
-    parsed_constraints = safe_parse(row[1], {})
-
-    jwt_payload = {
-        "agent_id": row[3], # The clean human-readable name (e.g., "FinanceBot")
-        "user_id": row[2], 
-        "scopes": parsed_scopes,
-        "constraints": parsed_constraints
-    }
-    
-    token = jwt.encode(jwt_payload, SECRET_KEY, algorithm="HS256")
-    return {"token": token}
+def mint_token(request: MintRequest):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        
+        # Authenticate strictly against the new api_key column
+        cursor.execute(
+            "SELECT scopes, constraints FROM policies WHERE api_key = %s AND status = 'ACTIVE'", 
+            (request.agent_id,)
+        )
+        
+        row = cursor.fetchone()
+        
+        if not row:
+            cursor.close()
+            conn.close()
+            raise HTTPException(status_code=401, detail="Invalid API Key or Inactive Policy")
+            
+        scopes_data, constraints_data = row
+        
+        # Safely parse JSONB/String data from PostgreSQL
+        parsed_scopes = json.loads(scopes_data) if isinstance(scopes_data, str) else scopes_data
+        parsed_constraints = json.loads(constraints_data) if isinstance(constraints_data, str) else constraints_data
+        
+        # Construct the IBCT (Invocation-Bound Capability Token)
+        jwt_payload = {
+            "api_key": request.agent_id,
+            "scopes": parsed_scopes,
+            "constraints": parsed_constraints,
+            "exp": time.time() + 3600  # Strict 1-hour time-to-live
+        }
+        
+        token = jwt.encode(jwt_payload, SECRET_KEY, algorithm="HS256")
+        
+        cursor.close()
+        conn.close()
+        
+        return {"token": token}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[AEGIS MINT ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail="Token minting failed.")
 
 @app.post("/execute")
 def execute_tool(req: ExecuteRequest):
