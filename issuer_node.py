@@ -59,6 +59,7 @@ class ExecuteRequest(BaseModel):
 class TelemetryPayload(BaseModel):
     agent_id: str
     action: str
+    target: str
     reason: str
     status: str = "BLOCKED"
 
@@ -185,12 +186,11 @@ def log_threat(payload: TelemetryPayload):
         real_user_id = row[0]
         readable_agent_name = row[1]
 
-        # FIX: Dynamically insert payload.status instead of hardcoding "BLOCKED"
-        # Also lowered latency_ms to '2' to reflect our new Ed25519 offline speed!
+        # FIX 2: Using payload.target instead of "network_intercept"
         cursor.execute('''
             INSERT INTO audit_logs (user_id, agent_id, action, target, status, reason, latency_ms) 
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ''', (real_user_id, readable_agent_name, payload.action, "network_intercept", payload.status, payload.reason, 2))
+        ''', (real_user_id, readable_agent_name, payload.action, payload.target, payload.status, payload.reason, 2))
         
         conn.commit()
         conn.close()
