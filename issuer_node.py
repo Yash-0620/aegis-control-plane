@@ -43,6 +43,7 @@ def get_db_connection():
 
 # --- The Agnostic Payload Model ---
 class PolicyPayload(BaseModel):
+    user_id: str  # Multi-tenant Clerk ID
     agent_id: str  # Human-readable name (e.g., "HR-Agent-01")
     scopes: List[str]  # e.g., ["github:repo:delete", "stripe:refund:write"]
     # THE UPGRADE: 'constraints' no longer holds hardcoded rules like 'max_amount'.
@@ -93,32 +94,25 @@ def safe_parse(data, default_val):
 # --- Control Plane - The Universal Policy Endpoint ---
 @app.post("/admin/add_policy")
 def add_policy(payload: PolicyPayload):
-    conn = None  # Initialize to None so our exception handler doesn't crash
+    conn = None
     try:
-        # 1. Generate the standard secure API Identity Key
         api_key_hex = secrets.token_hex(16)
         api_key = f"aegis_live_{api_key_hex}"
-        
-        # 2. Convert standard lists and dynamic JSON-Schemas into JSON strings for Postgres
         scopes_json = json.dumps(payload.scopes)
         constraints_json = json.dumps(payload.constraints)
         
-        # 3. Spin up a fresh Database Connection using your helper function
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 4. Store the Universal Schema in Supabase
+        # THE FIX: Insert the user_id into the Supabase row
         cursor.execute(
             """
-            INSERT INTO policies (agent_id, api_key, scopes, constraints, status)
-            VALUES (%s, %s, %s, %s, 'ACTIVE')
+            INSERT INTO policies (user_id, agent_id, api_key, scopes, constraints, status)
+            VALUES (%s, %s, %s, %s, %s, 'ACTIVE')
             """,
-            (payload.agent_id, api_key, scopes_json, constraints_json)
+            (payload.user_id, payload.agent_id, api_key, scopes_json, constraints_json)
         )
-        
-        # 5. Lock in the write
         conn.commit()
-        
         return {"status": "SUCCESS", "api_key": api_key, "agent_id": payload.agent_id}
         
     except Exception as e:
