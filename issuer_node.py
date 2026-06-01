@@ -110,13 +110,17 @@ def add_policy(payload: PolicyPayload):
             """,
             (payload.agent_id, api_key, scopes_json, constraints_json)
         )
-        conn.commit()
+        
+        # THE FIX: Directly access the connection tied to the cursor
+        cursor.connection.commit()
         
         return {"status": "SUCCESS", "api_key": api_key, "agent_id": payload.agent_id}
     except Exception as e:
-        conn.rollback()
+        # THE FIX: Safely rollback using the cursor's connection
+        cursor.connection.rollback()
         print(f"Database Error: {e}")
-        raise HTTPException(status_code=500, detail="Database failure during schema injection")
+        # Passing the raw error string helps us debug if it ever fails again
+        raise HTTPException(status_code=500, detail=f"Database failure: {str(e)}")
 
 # --- The Schema-Embedded Minting Endpoint ---
 @app.post("/mint")
