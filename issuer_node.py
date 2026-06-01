@@ -60,6 +60,7 @@ class ExecuteRequest(BaseModel):
 
 
 class TelemetryPayload(BaseModel):
+    user_id: str   # Essential for linking the log to your Dashboard
     agent_id: str
     action: str
     target: str
@@ -192,30 +193,34 @@ def mint_token(req: dict):
 
 @app.post("/telemetry/log_threat")
 def log_threat(payload: TelemetryPayload):
-    """SaaS Telemetry Receiver: Logs threats and allowed actions from Edge."""
+    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        # 1. Safely open the database connection
+        conn = get_db_connection()
         cursor = conn.cursor()
+
+        # 2. Write the execution data AND the Multi-Tenant user_id to Supabase
+        cursor.execute(
+            """
+            INSERT INTO audit_logs (user_id, agent_id, action, target, reason, status)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (payload.user_id, payload.agent_id, payload.action, payload.target, payload.reason, payload.status)
+        )
         
-        cursor.execute("SELECT user_id, agent_id FROM policies WHERE api_key = %s", (payload.agent_id,))
-        row = cursor.fetchone()
-
-        if not row:
-            conn.close()
-            raise HTTPException(status_code=404, detail="Agent identity not found in Aegis Cloud.")
-
-        real_user_id = row[0]
-        readable_agent_name = row[1]
-
-        # FIX 2: Using payload.target instead of "network_intercept"
-        cursor.execute('''
-            INSERT INTO audit_logs (user_id, agent_id, action, target, status, reason, latency_ms) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ''', (real_user_id, readable_agent_name, payload.action, payload.target, payload.status, payload.reason, 2))
-        
+        # 3. Lock in the write
         conn.commit()
-        conn.close()
-        return {"status": "success", "message": "Telemetry securely logged."}
+        return {"status": "SUCCESS", "message": "Telemetry logged"}
+        
     except Exception as e:
-        print(f"Telemetry Sync Error: {e}")
-        raise HTTPException(status_code=500, detail="Internal SaaS Error")
+        if conn:
+            conn.rollback()
+        print(f"Telemetry Error: {e}")
+        # Return 500 so we can see if it fails in the logs
+        raise HTTPException(status_code=500, detail=f"Database failure: {str(e)}")
+        
+    finally:
+        # 4. MEMORY LEAK PROTECTION: Close the connection
+        if conn:
+            cursor.close()
+            conn.close()
