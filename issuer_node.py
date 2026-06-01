@@ -93,6 +93,7 @@ def safe_parse(data, default_val):
 # --- Control Plane - The Universal Policy Endpoint ---
 @app.post("/admin/add_policy")
 def add_policy(payload: PolicyPayload):
+    conn = None  # Initialize to None so our exception handler doesn't crash
     try:
         # 1. Generate the standard secure API Identity Key
         api_key_hex = secrets.token_hex(16)
@@ -102,7 +103,11 @@ def add_policy(payload: PolicyPayload):
         scopes_json = json.dumps(payload.scopes)
         constraints_json = json.dumps(payload.constraints)
         
-        # 3. Store the Universal Schema in Supabase
+        # 3. Spin up a fresh Database Connection using your helper function
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 4. Store the Universal Schema in Supabase
         cursor.execute(
             """
             INSERT INTO policies (agent_id, api_key, scopes, constraints, status)
@@ -111,16 +116,23 @@ def add_policy(payload: PolicyPayload):
             (payload.agent_id, api_key, scopes_json, constraints_json)
         )
         
-        # THE FIX: Directly access the connection tied to the cursor
-        cursor.connection.commit()
+        # 5. Lock in the write
+        conn.commit()
         
         return {"status": "SUCCESS", "api_key": api_key, "agent_id": payload.agent_id}
+        
     except Exception as e:
-        # THE FIX: Safely rollback using the cursor's connection
-        cursor.connection.rollback()
+        # Safely rollback if the connection was successfully established before the crash
+        if conn:
+            conn.rollback()
         print(f"Database Error: {e}")
-        # Passing the raw error string helps us debug if it ever fails again
         raise HTTPException(status_code=500, detail=f"Database failure: {str(e)}")
+        
+    finally:
+        # 6. MEMORY LEAK PROTECTION: Always close the connection, even if the endpoint crashes
+        if conn:
+            cursor.close()
+            conn.close()
 
 # --- The Schema-Embedded Minting Endpoint ---
 @app.post("/mint")
