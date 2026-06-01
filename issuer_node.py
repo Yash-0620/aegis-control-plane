@@ -135,8 +135,13 @@ def mint_token(req: dict):
     if not api_key:
         raise HTTPException(status_code=401, detail="Missing API Key")
 
+    conn = None
     try:
-        # 1. Look up the Agent Identity by their API Key
+        # 1. Spin up a fresh connection just like we did in add_policy
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # 2. Look up the Agent Identity by their API Key
         cursor.execute(
             """
             SELECT id, agent_id, scopes, constraints 
@@ -156,22 +161,32 @@ def mint_token(req: dict):
         scopes_data = json.loads(scopes) if isinstance(scopes, str) else scopes
         constraints_data = json.loads(constraints) if isinstance(constraints, str) else constraints
 
-        # 2. Construct the Asymmetric Token Payload
-        # We are bundling the exact JSON-Schema rules straight into the Ed25519 token
+        # 3. Construct the Asymmetric Token Payload
         payload = {
-            "user_id": db_id,
+            "user_id": str(db_id),
             "agent_id": agent_name,
             "allowed_scopes": scopes_data,
-            "schema_bounds": constraints_data # The Sidecar will read this schema locally
+            "schema_bounds": constraints_data
         }
 
-        # 3. Sign the token mathematically using our Cloud Private Key
-        token = jwt.encode(payload, AEGIS_PRIVATE_KEY, algorithm="EdDSA")
+        # 4. Sign the token mathematically using our Cloud Private Key
+        # FIX: Using the correct 'PRIVATE_KEY' variable name from your config
+        token = jwt.encode(payload, PRIVATE_KEY, algorithm="EdDSA")
         return {"token": token}
         
+    except HTTPException:
+        # If we manually raised an HTTP exception (like 403 Invalid Key), let it pass through
+        raise
     except Exception as e:
         print(f"Minting Error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to mint Ed25519 token")
+        # In the future, we keep this generic to hide database errors from hackers
+        raise HTTPException(status_code=500, detail=f"Failed to mint Ed25519 token: {str(e)}")
+        
+    finally:
+        # 5. MEMORY LEAK PROTECTION: Close the database connection
+        if conn:
+            cursor.close()
+            conn.close()
 
 
 @app.post("/telemetry/log_threat")
