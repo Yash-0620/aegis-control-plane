@@ -144,7 +144,7 @@ def mint_token(req: dict):
         # 2. Look up the Agent Identity by their API Key
         cursor.execute(
             """
-            SELECT id, agent_id, scopes, constraints 
+            SELECT user_id, agent_id, scopes, constraints 
             FROM policies 
             WHERE api_key = %s AND status = 'ACTIVE'
             """, 
@@ -155,7 +155,8 @@ def mint_token(req: dict):
         if not row:
             raise HTTPException(status_code=403, detail="Invalid or revoked API Key")
             
-        db_id, agent_name, scopes, constraints = row
+        # THE FIX: Unpack user_id
+        db_user_id, agent_name, scopes, constraints = row
 
         # Handle Postgres returning either strings or dicts natively
         scopes_data = json.loads(scopes) if isinstance(scopes, str) else scopes
@@ -163,7 +164,7 @@ def mint_token(req: dict):
 
         # 3. Construct the Asymmetric Token Payload
         payload = {
-            "user_id": str(db_id),
+            "user_id": db_user_id,  # <-- Embed the actual Clerk ID into the token
             "agent_id": agent_name,
             "allowed_scopes": scopes_data,
             "schema_bounds": constraints_data
