@@ -1,3 +1,6 @@
+from pydantic import BaseModel
+from typing import List, Dict, Any
+
 from httpcore import request
 import psycopg2
 import os
@@ -8,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
+import secrets
 
 # --- AEGIS CONFIGURATION ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -37,15 +41,13 @@ app.add_middleware(
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# --- PYDANTIC MODELS ---
+# --- The Agnostic Payload Model ---
 class PolicyPayload(BaseModel):
-    user_id: str
-    agent_id: str
-    api_key: str
-    scopes: list
-    constraints: dict
-    status: str
-    origin: str = "Internal AI Agent"
+    agent_id: str  # Human-readable name (e.g., "HR-Agent-01")
+    scopes: List[str]  # e.g., ["github:repo:delete", "stripe:refund:write"]
+    # THE UPGRADE: 'constraints' no longer holds hardcoded rules like 'max_amount'.
+    # It now strictly expects a valid JSON-Schema dictionary mapping to the scopes.
+    constraints: Dict[str, Any] # e.g., {"stripe:refund:write": {"type": "object", "properties": {"amount": {"type": "number", "maximum": 100}}}}
 
 class MintRequest(BaseModel):
     agent_id: str  # Note: The SDK currently passes the api_key via this field
@@ -88,85 +90,78 @@ def safe_parse(data, default_val):
         return default_val
 
 
-# --- CONTROL PLANE ENDPOINTS ---
+# --- Control Plane - The Universal Policy Endpoint ---
 @app.post("/admin/add_policy")
 def add_policy(payload: PolicyPayload):
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
+        # 1. Generate the standard secure API Identity Key
+        api_key_hex = secrets.token_hex(16)
+        api_key = f"aegis_live_{api_key_hex}"
         
+        # 2. Convert standard lists and dynamic JSON-Schemas into JSON strings for Postgres
+        scopes_json = json.dumps(payload.scopes)
+        constraints_json = json.dumps(payload.constraints)
+        
+        # 3. Store the Universal Schema in Supabase
         cursor.execute(
             """
-            INSERT INTO policies (user_id, agent_id, api_key, scopes, constraints, status) 
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO policies (agent_id, api_key, scopes, constraints, status)
+            VALUES (%s, %s, %s, %s, 'ACTIVE')
             """,
-            (
-                payload.user_id, 
-                payload.agent_id, 
-                payload.api_key, 
-                json.dumps(payload.scopes), 
-                json.dumps(payload.constraints), 
-                payload.status
-            )
+            (payload.agent_id, api_key, scopes_json, constraints_json)
         )
-        
         conn.commit()
-        cursor.close()
-        conn.close()
         
-        return {"status": "SUCCESS", "message": "Policy deployed to Aegis DB"}
-        
+        return {"status": "SUCCESS", "api_key": api_key, "agent_id": payload.agent_id}
     except Exception as e:
-        print(f"[AEGIS DB ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail="Database insertion failed.")
+        conn.rollback()
+        print(f"Database Error: {e}")
+        raise HTTPException(status_code=500, detail="Database failure during schema injection")
 
+# --- The Schema-Embedded Minting Endpoint ---
 @app.post("/mint")
-def mint_token(request: MintRequest):
+def mint_token(req: dict):
+    api_key = req.get("api_key")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API Key")
+
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        
-        # FIX: Fetch user_id and agent_id as well to inject into the JWT for telemetry tracking
+        # 1. Look up the Agent Identity by their API Key
         cursor.execute(
-            "SELECT scopes, constraints, user_id, agent_id FROM policies WHERE api_key = %s AND status = 'ACTIVE'", 
-            (request.agent_id,)
+            """
+            SELECT id, agent_id, scopes, constraints 
+            FROM policies 
+            WHERE api_key = %s AND status = 'ACTIVE'
+            """, 
+            (api_key,)
         )
-        
         row = cursor.fetchone()
         
         if not row:
-            cursor.close()
-            conn.close()
-            raise HTTPException(status_code=401, detail="Invalid API Key or Inactive Policy")
+            raise HTTPException(status_code=403, detail="Invalid or revoked API Key")
             
-        scopes_data, constraints_data, user_id, agent_id = row
-        
-        # Safely parse JSONB/String data from PostgreSQL
-        parsed_scopes = json.loads(scopes_data) if isinstance(scopes_data, str) else scopes_data
-        parsed_constraints = json.loads(constraints_data) if isinstance(constraints_data, str) else constraints_data
-        
-        # Construct the IBCT with full identity data
-        jwt_payload = {
-            "api_key": request.agent_id,
-            "user_id": user_id,
-            "agent_id": agent_id,  # The human-readable name
-            "scopes": parsed_scopes,
-            "constraints": parsed_constraints,
-            "exp": time.time() + 3600   # Strict 1-hour time-to-live
+        db_id, agent_name, scopes, constraints = row
+
+        # Handle Postgres returning either strings or dicts natively
+        scopes_data = json.loads(scopes) if isinstance(scopes, str) else scopes
+        constraints_data = json.loads(constraints) if isinstance(constraints, str) else constraints
+
+        # 2. Construct the Asymmetric Token Payload
+        # We are bundling the exact JSON-Schema rules straight into the Ed25519 token
+        payload = {
+            "user_id": db_id,
+            "agent_id": agent_name,
+            "allowed_scopes": scopes_data,
+            "schema_bounds": constraints_data # The Sidecar will read this schema locally
         }
-        
-        token = jwt.encode(jwt_payload, PRIVATE_KEY, algorithm="EdDSA")
-        
-        cursor.close()
-        conn.close()
-        
+
+        # 3. Sign the token mathematically using our Cloud Private Key
+        token = jwt.encode(payload, AEGIS_PRIVATE_KEY, algorithm="EdDSA")
         return {"token": token}
         
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"[AEGIS MINT ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail="Token minting failed.")
+        print(f"Minting Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to mint Ed25519 token")
 
 
 @app.post("/telemetry/log_threat")
