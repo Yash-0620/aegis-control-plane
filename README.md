@@ -8,45 +8,47 @@ Aegis is the open-source standard for zero-trust AI agent security. It prevents 
 
 ## 🌐 The Aegis Ecosystem
 To deploy a mathematically enforced zero-trust boundary, Aegis utilizes a decoupled architecture:
-1. **[The Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)**: Your CISO dashboard to define zero-trust policies, set parameter bounds, and generate Agent API Keys.
-2. **[The Aegis MCP Sidecar](https://github.com/Yash-0620/aegis-mcp-sidecar.git)**: The stateless, open-source edge proxy that enforces your policies locally.
+1. **[The Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)**: Your CISO dashboard to define Universal JSON-Schema bounds, set mathematical limits, and generate Agent API Keys.
+2. **[The Aegis MCP Sidecar](https://github.com/Yash-0620/aegis-mcp-sidecar.git)**: The stateless, open-source edge proxy that intercepts traffic and enforces your schema mathematically.
 
 ## 🛡️ The Architecture: Ed25519 Cryptography
 Unlike legacy API wrappers that require synchronous cloud round-trips to evaluate agent permissions, Aegis utilizes **Asymmetric Ed25519 Cryptography**:
-1. **The Private Key (This Repo):** The Control Plane securely holds the Ed25519 Private Key. It is the only entity mathematically capable of minting IBCTs.
-2. **The Public Key (The Edge):** The open-source `aegis-mcp-sidecar` holds the Public Key, allowing it to mathematically verify token signatures locally in `<2ms`.
+1. **The Private Key (This Repo):** The Control Plane securely holds the Ed25519 Private Key. It is the only entity mathematically capable of minting IBCTs. The token embeds the exact JSON-Schema directly into the payload.
+2. **The Public Key (The Edge):** The open-source `aegis-mcp-sidecar` holds the Public Key, allowing it to verify token signatures and execute structural regex/integer bounds locally in `<2ms`.
 
-This architecture decouples token issuance from token verification, granting AI agents true zero-latency execution while maintaining absolute cryptographic bounds.
+This architecture decouples token issuance from token verification, granting AI agents zero-latency execution while maintaining absolute cryptographic containment.
 
 ---
 
 ## 🛠️ Integration & Developer Friction
 
-To keep integration frictionless, developers do **not** need to interact with the REST API directly. We provide a drop-in Python SDK (`aegis-aip`) that acts as a secure network interceptor.
+To keep integration frictionless, developers do **not** need to interact with the REST API directly. We provide a drop-in Python SDK (`aegis-aip`) that handles the cryptographic handshakes automatically.
 
-### 1. Generate Your Agent Identity
-Head over to the **[Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)**. Create an account, configure your agent's cryptographic bounds (e.g., maximum dollar amounts for Stripe refunds), and mint your Agent API Key.
+### 1. Generate Your Cryptographic Schema
+Head over to the **[Aegis Cloud Console](https://aegis-cloud-console.vercel.app/)**. Create an account, configure your target tool's JSON-Schema boundaries (e.g., forcing a regex match for `.*-dev-repo`), and mint your Agent API Key.
 
 ### 2. Install the SDK
 ```bash
 pip install aegis-aip
 ```
 
-### 3. Secure Your Agent in 3 Lines
+### 3. Secure Your Custom Agent in 3 Lines
 ```python
 from aegis_aip import AegisClient
 
 # 1. Initialize the SDK with the key generated from the Cloud Console
 aegis = AegisClient(
-    agent_id="FinanceBot_live_8f45f0...",
+    api_key="aegis_live_8f45f0...", # <--- Your specific API Key
     control_plane_url="[https://aegis-live-node.onrender.com](https://aegis-live-node.onrender.com)",
-    sidecar_url="http://localhost:8080"
+    sidecar_url="http://localhost:8080/mcp/v1/tools/call" # The address of your deployed proxy
 )
 
-# 2. Wrap your MCP calls. Aegis handles the secure routing and auth headers.
+# 2. Wrap your MCP calls. Aegis mints the token, attaches headers, and fires the payload.
 response = aegis.secure_tool_call(
-    tool_name="stripe:refund:write",
-    params={"amount": 50, "transaction_id": "tx_123"}
+    tool_name="github:repo:delete",
+    params={
+        "Github": "test-dev-repo" # Must match your Cloud Console JSON-Schema!
+    }
 )
 
 print(response)
@@ -72,8 +74,10 @@ cd aegis-control-plane
 pip install -r requirements.txt
 
 # 3. Set Environment Variables
+# 3. Generate Your Own Cryptographic Keys & Set Environment Variables
+# Run `python generate_keys.py` to create your own isolated Ed25519 key pair.
 export DATABASE_URL="postgresql://user:pass@host:5432/db"
-export AEGIS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+export AEGIS_PRIVATE_KEY="<PASTE_YOUR_NEWLY_GENERATED_PRIVATE_KEY_HERE>"
 
 # 4. Boot the Uvicorn Server
 uvicorn issuer_node:app --host 0.0.0.0 --port 8000
