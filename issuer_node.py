@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
 import secrets
+from fastapi import Response
 
 # --- AEGIS CONFIGURATION ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -29,6 +30,10 @@ if not PRIVATE_KEY:
 SECRET_KEY = os.environ.get("AEGIS_SECRET_KEY", "super_secret_aegis_key_for_mvp")
 
 app = FastAPI()
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
 
 app.add_middleware(
     CORSMiddleware,
