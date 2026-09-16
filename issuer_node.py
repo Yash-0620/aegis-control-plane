@@ -140,14 +140,16 @@ def mint_token(req: dict):
     api_key = req.get("api_key")
     if not api_key:
         raise HTTPException(status_code=401, detail="Missing API Key")
-
+    
+    # Extract dynamic invocation bindings sent by the caller/SDK
+    agent_sub = req.get("agent_sub") # Identity to pin (e.g. Entra sub)
+    jti = req.get("jti") or secrets.token_hex(16)
+    expires_in = int(req.get("expires_in", 300)) # Default 5 min TTL
+    
     conn = None
     try:
-        # 1. Spin up a fresh connection just like we did in add_policy
         conn = get_db_connection()
         cursor = conn.cursor()
-
-        # 2. Look up the Agent Identity by their API Key
         cursor.execute(
             """
             SELECT user_id, agent_id, scopes, constraints 
@@ -157,40 +159,29 @@ def mint_token(req: dict):
             (api_key,)
         )
         row = cursor.fetchone()
-        
         if not row:
             raise HTTPException(status_code=403, detail="Invalid or revoked API Key")
             
-        # THE FIX: Unpack user_id
         db_user_id, agent_name, scopes, constraints = row
-
-        # Handle Postgres returning either strings or dicts natively
         scopes_data = json.loads(scopes) if isinstance(scopes, str) else scopes
         constraints_data = json.loads(constraints) if isinstance(constraints, str) else constraints
-
-        # 3. Construct the Asymmetric Token Payload
+        
+        now = int(time.time())
         payload = {
-            "user_id": db_user_id,  # <-- Embed the actual Clerk ID into the token
+            "user_id": db_user_id,
             "agent_id": agent_name,
+            "sub": agent_sub or agent_name, # Pinned identity
+            "jti": jti,                     # Unique invocation nonce
+            "iat": now,
+            "nbf": now,
+            "exp": now + expires_in,        # Cryptographic expiration
             "allowed_scopes": scopes_data,
             "schema_bounds": constraints_data
         }
-
-        # 4. Sign the token mathematically using our Cloud Private Key
-        # FIX: Using the correct 'PRIVATE_KEY' variable name from your config
+        
         token = jwt.encode(payload, PRIVATE_KEY, algorithm="EdDSA")
-        return {"token": token}
-        
-    except HTTPException:
-        # If we manually raised an HTTP exception (like 403 Invalid Key), let it pass through
-        raise
-    except Exception as e:
-        print(f"Minting Error: {e}")
-        # In the future, we keep this generic to hide database errors from hackers
-        raise HTTPException(status_code=500, detail=f"Failed to mint Ed25519 token: {str(e)}")
-        
+        return {"token": token, "jti": jti, "exp": payload["exp"]}
     finally:
-        # 5. MEMORY LEAK PROTECTION: Close the database connection
         if conn:
             cursor.close()
             conn.close()
