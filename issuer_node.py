@@ -1,3 +1,7 @@
+from pydantic import BaseModel
+from typing import List, Dict, Any
+
+from httpcore import request
 import psycopg2
 import os
 import time
@@ -7,6 +11,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
+import secrets
+from fastapi import Response
 
 # --- AEGIS CONFIGURATION ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -15,10 +21,19 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("[FATAL ERROR] DATABASE_URL environment variable is not set. Halting boot.")
 
+# Load the Ed25519 Private Key
+PRIVATE_KEY = os.environ.get("AEGIS_PRIVATE_KEY")
+if not PRIVATE_KEY:
+    raise RuntimeError("[FATAL ERROR] AEGIS_PRIVATE_KEY environment variable is missing.")
+
 # We will lock this down in a future sprint, but it's okay for local testing right now.
 SECRET_KEY = os.environ.get("AEGIS_SECRET_KEY", "super_secret_aegis_key_for_mvp")
 
 app = FastAPI()
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,16 +46,17 @@ app.add_middleware(
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# --- MODELS ---
+# --- The Agnostic Payload Model ---
 class PolicyPayload(BaseModel):
-    user_id: str
-    agent_id: str
-    scopes: list
-    constraints: dict
-    status: str = None
+    user_id: str  # Multi-tenant Clerk ID
+    agent_id: str  # Human-readable name (e.g., "HR-Agent-01")
+    scopes: List[str]  # e.g., ["github:repo:delete", "stripe:refund:write"]
+    # THE UPGRADE: 'constraints' no longer holds hardcoded rules like 'max_amount'.
+    # It now strictly expects a valid JSON-Schema dictionary mapping to the scopes.
+    constraints: Dict[str, Any] # e.g., {"stripe:refund:write": {"type": "object", "properties": {"amount": {"type": "number", "maximum": 100}}}}
 
 class MintRequest(BaseModel):
-    agent_id: str
+    agent_id: str  # Note: The SDK currently passes the api_key via this field
 
 class ExecuteRequest(BaseModel):
     token: str
@@ -49,9 +65,12 @@ class ExecuteRequest(BaseModel):
 
 
 class TelemetryPayload(BaseModel):
-    agent_id: str  # This is the long API key sent by the Sidecar
+    user_id: str   # Essential for linking the log to your Dashboard
+    agent_id: str
     action: str
+    target: str
     reason: str
+    status: str = "BLOCKED"
 
 
 # --- BULLETPROOF PARSER ---
@@ -78,194 +97,126 @@ def safe_parse(data, default_val):
         return default_val
 
 
-# --- ENDPOINTS ---
+# --- Control Plane - The Universal Policy Endpoint ---
 @app.post("/admin/add_policy")
 def add_policy(payload: PolicyPayload):
-    """Called by the Next.js Dashboard to save rules to Supabase."""
+    conn = None
     try:
+        api_key_hex = secrets.token_hex(16)
+        api_key = f"aegis_live_{api_key_hex}"
+        scopes_json = json.dumps(payload.scopes)
+        constraints_json = json.dumps(payload.constraints)
+        
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # UPDATED: Inserting the status column
-        cursor.execute('''
-            INSERT INTO policies (agent_id, user_id, scopes, constraints, status) 
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (agent_id) DO UPDATE 
-            SET user_id = EXCLUDED.user_id, scopes = EXCLUDED.scopes, constraints = EXCLUDED.constraints, status = EXCLUDED.status
-        ''', (payload.agent_id, payload.user_id, str(payload.scopes), str(payload.constraints), payload.status))
-        
+        # THE FIX: Insert the user_id into the Supabase row
+        cursor.execute(
+            """
+            INSERT INTO policies (user_id, agent_id, api_key, scopes, constraints, status)
+            VALUES (%s, %s, %s, %s, %s, 'ACTIVE')
+            """,
+            (payload.user_id, payload.agent_id, api_key, scopes_json, constraints_json)
+        )
         conn.commit()
-        conn.close()
-        return {"status": "success", "message": "Zero-Trust Policy Deployed."}
+        return {"status": "SUCCESS", "api_key": api_key, "agent_id": payload.agent_id}
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Safely rollback if the connection was successfully established before the crash
+        if conn:
+            conn.rollback()
+        print(f"Database Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database failure: {str(e)}")
+        
+    finally:
+        # 6. MEMORY LEAK PROTECTION: Always close the connection, even if the endpoint crashes
+        if conn:
+            cursor.close()
+            conn.close()
 
+# --- The Schema-Embedded Minting Endpoint ---
 @app.post("/mint")
-def mint_token(req: MintRequest):
-    """Mints the Cryptographic Token containing the user's rules."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def mint_token(req: dict):
+    api_key = req.get("api_key")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API Key")
     
-    # UPDATED: Search using 'status' (which holds the token), and fetch the real 'agent_id' (row[3])
-    cursor.execute("SELECT scopes, constraints, user_id, agent_id FROM policies WHERE status = %s", (req.agent_id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Agent identity not found in Aegis Cloud.")
-
-    parsed_scopes = safe_parse(row[0], [])
-    parsed_constraints = safe_parse(row[1], {})
-
-    jwt_payload = {
-        "agent_id": row[3], # The clean human-readable name (e.g., "FinanceBot")
-        "user_id": row[2], 
-        "scopes": parsed_scopes,
-        "constraints": parsed_constraints
-    }
+    # Extract dynamic invocation bindings sent by the caller/SDK
+    agent_sub = req.get("agent_sub") # Identity to pin (e.g. Entra sub)
+    jti = req.get("jti") or secrets.token_hex(16)
+    expires_in = int(req.get("expires_in", 300)) # Default 5 min TTL
     
-    token = jwt.encode(jwt_payload, SECRET_KEY, algorithm="HS256")
-    return {"token": token}
-
-@app.post("/execute")
-def execute_tool(req: ExecuteRequest):
-    """The Bouncer: Evaluates the prompt and fires telemetry to the CISO Dashboard."""
-    start_time = time.time()
-    
-    # 1. Cryptographic Verification
-    try:
-        decoded = jwt.decode(req.token, SECRET_KEY, algorithms=["HS256"])
-    except jwt.ExpiredSignatureError:
-        return {"status": "BLOCKED", "reason": "Token expired"}
-    except jwt.InvalidTokenError:
-        return {"status": "BLOCKED", "reason": "Cryptographic signature invalid"}
-
-    user_id = decoded.get("user_id")
-    if not user_id: 
-        user_id = "unregistered_test_agent"
-        
-    agent_id = decoded.get("agent_id")
-    scopes = decoded.get("scopes", [])
-    constraints = decoded.get("constraints", {})
-
-    status = "ALLOWED"
-    reason = "Policy matched"
-    target = str(req.params)
-
-    # 2. Mathematical Boundary Checking
-    if req.tool_name not in scopes:
-        status = "BLOCKED"
-        reason = f"Restricted Scope Violation: {req.tool_name}"
-    else:
-        tool_constraints = constraints.get(req.tool_name, {})
-        params = req.params
-
-        # --- TOOL 1: STRIPE REFUNDS ---
-        if req.tool_name == "stripe:refund:write":
-            target = f"Refund ${params.get('amount', 0)}"
-            if params.get("amount", 0) > tool_constraints.get("max_amount", 0):
-                status = "BLOCKED"
-                reason = f"Mathematical Bound Exceeded (${tool_constraints.get('max_amount')} limit)"
-
-        # --- TOOL 2: CORPORATE EMAIL ---
-        elif req.tool_name == "email:send:write":
-            target = params.get("to_email", "unknown_recipient")
-            
-            # THE DEBUG BLOCK
-            print(f"DEBUG: Complete Constraints Object Received: {constraints}", flush=True)
-            print(f"DEBUG: Tool Name Requested: {req.tool_name}", flush=True)
-            
-            tool_constraints = constraints.get(req.tool_name, {})
-            print(f"DEBUG: Tool Constraints Parsed: {tool_constraints}", flush=True)
-            # --------------------------------
-            
-            internal_only = tool_constraints.get("internal_domains_only", True)
-            
-            if internal_only:
-                allowed_domains = tool_constraints.get("allowed_domains", ["company.com"])
-                print(f"DEBUG: Final Whitelist in use: {allowed_domains}", flush=True)
-                
-                if not any(target.endswith(f"@{domain}") for domain in allowed_domains):
-                    status = "BLOCKED"
-                    reason = f"Exfiltration Attempt - Domain {target.split('@')[-1]} not in whitelist"
-
-        # --- TOOL 3: FILE SYSTEM SEARCH ---
-        elif req.tool_name == "fs:search:read":
-            file_type = params.get("file_extension", "")
-            target = f"Search: {file_type}"
-            allowed_exts = tool_constraints.get("allowed_extensions", [])
-            
-            clean_allowed = [ext.replace(".", "") for ext in allowed_exts]
-            clean_requested = file_type.replace(".", "")
-            
-            if clean_requested not in clean_allowed:
-                status = "BLOCKED"
-                reason = f"Unauthorized File Extension: {file_type}"
-
-        # --- TOOL 4: DATABASE QUERIES ---
-        elif req.tool_name == "database:query:read":
-            table = params.get("target_table", "")
-            query = params.get("query", "").upper()
-            target = f"DB Query: {table}"
-            allowed_tables = tool_constraints.get("allowed_tables", [])
-            
-            if table not in allowed_tables:
-                status = "BLOCKED"
-                reason = f"Unauthorized Table Access: {table}"
-            elif any(keyword in query for keyword in ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE"]):
-                status = "BLOCKED"
-                reason = "Destructive SQL Operation Detected"
-
-    latency_ms = int((time.time() - start_time) * 1000)
-
-    # 3. Fire Telemetry to Supabase
+    conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO audit_logs (user_id, agent_id, action, target, status, reason, latency_ms) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ''', (user_id, agent_id, req.tool_name, target, status, reason, max(latency_ms, 12)))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Telemetry Sync Error: {e}")
-
-    # 4. Return Decision
-    if status == "BLOCKED":
-        return {"status": "ACCESS_DENIED", "reason": f"[AEGIS BLOCKED] {reason}"}
+        cursor.execute(
+            """
+            SELECT user_id, agent_id, scopes, constraints 
+            FROM policies 
+            WHERE api_key = %s AND status = 'ACTIVE'
+            """, 
+            (api_key,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=403, detail="Invalid or revoked API Key")
+            
+        db_user_id, agent_name, scopes, constraints = row
+        scopes_data = json.loads(scopes) if isinstance(scopes, str) else scopes
+        constraints_data = json.loads(constraints) if isinstance(constraints, str) else constraints
         
-    return {"status": "SUCCESS", "data": f"Executed {req.tool_name} successfully."}
+        now = int(time.time())
+        payload = {
+            "user_id": db_user_id,
+            "agent_id": agent_name,
+            "sub": agent_sub or agent_name, # Pinned identity
+            "jti": jti,                     # Unique invocation nonce
+            "iat": now,
+            "nbf": now,
+            "exp": now + expires_in,        # Cryptographic expiration
+            "allowed_scopes": scopes_data,
+            "schema_bounds": constraints_data
+        }
+        
+        token = jwt.encode(payload, PRIVATE_KEY, algorithm="EdDSA")
+        return {"token": token, "jti": jti, "exp": payload["exp"]}
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
 
 
 @app.post("/telemetry/log_threat")
 def log_threat(payload: TelemetryPayload):
-    """SaaS Telemetry Receiver: Logs threats from external Enterprise Sidecars."""
+    conn = None
     try:
+        # 1. Safely open the database connection
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        # 2. Write the execution data AND the Multi-Tenant user_id to Supabase
+        cursor.execute(
+            """
+            INSERT INTO audit_logs (user_id, agent_id, action, target, reason, status)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (payload.user_id, payload.agent_id, payload.action, payload.target, payload.reason, payload.status)
+        )
         
-        # 1. Reverse-Lookup the real user_id and human-readable agent name
-        # Remember: the API key is stored in the 'status' column in your schema
-        cursor.execute("SELECT user_id, agent_id FROM policies WHERE status = %s", (payload.agent_id,))
-        row = cursor.fetchone()
-
-        if not row:
-            conn.close()
-            raise HTTPException(status_code=404, detail="Agent identity not found in Aegis Cloud.")
-
-        real_user_id = row[0]
-        readable_agent_name = row[1]
-
-        # 2. Securely Insert into the SIEM Ledger
-        cursor.execute('''
-            INSERT INTO audit_logs (user_id, agent_id, action, target, status, reason, latency_ms) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ''', (real_user_id, readable_agent_name, payload.action, "network_intercept", "BLOCKED", payload.reason, 12))
-        
+        # 3. Lock in the write
         conn.commit()
-        conn.close()
-        return {"status": "success", "message": "Telemetry securely logged."}
+        return {"status": "SUCCESS", "message": "Telemetry logged"}
+        
     except Exception as e:
-        print(f"Telemetry Sync Error: {e}")
-        raise HTTPException(status_code=500, detail="Internal SaaS Error")
+        if conn:
+            conn.rollback()
+        print(f"Telemetry Error: {e}")
+        # Return 500 so we can see if it fails in the logs
+        raise HTTPException(status_code=500, detail=f"Database failure: {str(e)}")
+        
+    finally:
+        # 4. MEMORY LEAK PROTECTION: Close the connection
+        if conn:
+            cursor.close()
+            conn.close()
